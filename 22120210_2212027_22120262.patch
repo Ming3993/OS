@@ -1,0 +1,64 @@
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 58a8a0b..1e5b760 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -132,6 +132,14 @@ found:
+     return 0;
+   }
+ 
++  // Cấp phát cho trang usyscall.
++  if((p->usyscall = (struct usyscall *)kalloc()) == 0) {
++    freeproc(p);
++    release(&p->lock);
++    return 0;
++  }
++  (p->usyscall)->pid = p->pid;
++
+   // An empty user page table.
+   p->pagetable = proc_pagetable(p);
+   if(p->pagetable == 0){
+@@ -157,6 +165,8 @@ freeproc(struct proc *p)
+ {
+   if(p->trapframe)
+     kfree((void*)p->trapframe);
++  if(p->usyscall)
++    kfree((void*)p->usyscall);
+   p->trapframe = 0;
+   if(p->pagetable)
+     proc_freepagetable(p->pagetable, p->sz);
+@@ -202,6 +212,15 @@ proc_pagetable(struct proc *p)
+     return 0;
+   }
+ 
++  // Ánh xạ trang usyscall vào không gian địa chỉ người dùng.
++  if(mappages(pagetable, USYSCALL, PGSIZE,
++              (uint64)(p->usyscall), PTE_R | PTE_U) < 0) {
++    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
++    uvmunmap(pagetable, TRAPFRAME, 1, 0);
++    uvmfree(pagetable, 0);
++    return 0;
++  }
++
+   return pagetable;
+ }
+ 
+@@ -212,6 +231,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
+ {
+   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+   uvmunmap(pagetable, TRAPFRAME, 1, 0);
++  uvmunmap(pagetable, USYSCALL, 1 , 0);
+   uvmfree(pagetable, sz);
+ }
+ 
+diff --git a/kernel/proc.h b/kernel/proc.h
+index d021857..d752165 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -101,6 +101,7 @@ struct proc {
+   pagetable_t pagetable;       // User page table
+   struct trapframe *trapframe; // data page for trampoline.S
+   struct context context;      // swtch() here to run process
++  struct usyscall *usyscall;
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
