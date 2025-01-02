@@ -1,64 +1,73 @@
-diff --git a/kernel/proc.c b/kernel/proc.c
-index 58a8a0b..1e5b760 100644
---- a/kernel/proc.c
-+++ b/kernel/proc.c
-@@ -132,6 +132,14 @@ found:
-     return 0;
-   }
+diff --git a/kernel/riscv.h b/kernel/riscv.h
+index 20a01db..3b05fe6 100644
+--- a/kernel/riscv.h
++++ b/kernel/riscv.h
+@@ -343,6 +343,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
+ #define PTE_W (1L << 2)
+ #define PTE_X (1L << 3)
+ #define PTE_U (1L << 4) // user can access
++#define PTE_A (1L << 6) // xác định trang đã được kết nối
  
-+  // Cấp phát cho trang usyscall.
-+  if((p->usyscall = (struct usyscall *)kalloc()) == 0) {
-+    freeproc(p);
-+    release(&p->lock);
-+    return 0;
-+  }
-+  (p->usyscall)->pid = p->pid;
+ // shift a physical address to the right place for a PTE.
+ #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
+diff --git a/kernel/sysproc.h b/kernel/sysproc.h
+new file mode 100644
+index 0000000..083d787
+--- /dev/null
++++ b/kernel/sysproc.h
+@@ -0,0 +1,55 @@
++// Khai báo hàm walk
++extern pte_t *walk(pagetable_t pagetable, uint64 va, int alloc);
 +
-   // An empty user page table.
-   p->pagetable = proc_pagetable(p);
-   if(p->pagetable == 0){
-@@ -157,6 +165,8 @@ freeproc(struct proc *p)
- {
-   if(p->trapframe)
-     kfree((void*)p->trapframe);
-+  if(p->usyscall)
-+    kfree((void*)p->usyscall);
-   p->trapframe = 0;
-   if(p->pagetable)
-     proc_freepagetable(p->pagetable, p->sz);
-@@ -202,6 +212,15 @@ proc_pagetable(struct proc *p)
-     return 0;
-   }
- 
-+  // Ánh xạ trang usyscall vào không gian địa chỉ người dùng.
-+  if(mappages(pagetable, USYSCALL, PGSIZE,
-+              (uint64)(p->usyscall), PTE_R | PTE_U) < 0) {
-+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-+    uvmunmap(pagetable, TRAPFRAME, 1, 0);
-+    uvmfree(pagetable, 0);
-+    return 0;
++#ifdef LAB_PGTBL
++int
++sys_pgaccess(void)
++{
++  // lab pgtbl
++  uint64 va, ua;
++  int pnum;
++
++  // Lấy tham số
++  if (argaddr(0, &va) < 0 || 
++      argint(1, &pnum) < 0 || 
++      argaddr(2, &ua)) {
++      return -1;
 +  }
 +
-   return pagetable;
- }
- 
-@@ -212,6 +231,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
- {
-   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-   uvmunmap(pagetable, TRAPFRAME, 1, 0);
-+  uvmunmap(pagetable, USYSCALL, 1 , 0);
-   uvmfree(pagetable, sz);
- }
- 
-diff --git a/kernel/proc.h b/kernel/proc.h
-index d021857..d752165 100644
---- a/kernel/proc.h
-+++ b/kernel/proc.h
-@@ -101,6 +101,7 @@ struct proc {
-   pagetable_t pagetable;       // User page table
-   struct trapframe *trapframe; // data page for trampoline.S
-   struct context context;      // swtch() here to run process
-+  struct usyscall *usyscall;
-   struct file *ofile[NOFILE];  // Open files
-   struct inode *cwd;           // Current directory
-   char name[16];               // Process name (debugging)
++  // Nếu số lượng trang cần quét lớn hơn PGSIZE*8, trả về -1
++  if (pnum > PGSIZE * 8) {
++      return -1;
++  }
++
++  // Cấp phát một trang làm bộ đệm, kích thước bộ đệm là PGSIZE*8 bit, tức số trang cần quét không được vượt quá giá trị này
++  char *buf = kalloc();
++
++  // Khởi tạo bộ đệm, rất quan trọng, vì kalloc() sẽ điền dữ liệu không hợp lệ vào trang được cấp phát thay vì 0
++  memset(buf, 0, PGSIZE);
++
++  // Tính vị trí bắt đầu đánh dấu từ bit thứ cnt trong bộ đệm
++  int cnt = (pnum / 8 + ((pnum % 8) != 0)) * 8 - pnum;
++  printf("cnt = %d\n", cnt);
++
++  // Quét từng trang
++  for (int i = 0; i < pnum; i++, cnt++) {
++      // Lấy PTE tương ứng với địa chỉ ảo va + i * PGSIZE
++      pte_t *p = walk(myproc()->pagetable, va + i * PGSIZE, 0);
++
++      // Nếu PTE có bit PTE_A được bật
++      if (*p & PTE_A) {
++          // Đánh dấu vị trí tương ứng trong bộ đệm là 1, và xóa bit PTE_A trong PTE
++          buf[cnt / 8] |= 1 << (cnt % 8);
++          *p &= ~PTE_A;
++      }
++  }
++
++  // Sao chép kết quả từ kernel sang bộ đệm người dùng
++  copyout(myproc()->pagetable, ua, buf, pnum);
++
++  // Giải phóng trang bộ đệm
++  kfree(buf);
++
++  return 0;
++}
++#endif
